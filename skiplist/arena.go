@@ -4,7 +4,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/YzmjY/toykv/lib/val"
+	"github.com/YzmjY/toykv/val"
 )
 
 const (
@@ -69,8 +69,8 @@ func (s *Arena) getKey(offset uint32, size uint16) []byte {
 	return s.buf[offset : offset+uint32(size)]
 }
 
-func (s *Arena) getVal(offset uint32, size uint16) (ret val.ValueStruct) {
-	ret.Decode(s.buf[offset : offset+uint32(size)])
+func (s *Arena) getVal(offset uint32, size uint32) (ret val.ValueStruct) {
+	ret.Decode(s.buf[offset : offset+size])
 	return
 }
 
