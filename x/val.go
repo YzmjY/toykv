@@ -1,4 +1,4 @@
-package val
+package x
 
 import "encoding/binary"
 
@@ -33,7 +33,7 @@ func (v *ValueStruct) Encode(dst []byte) uint32 {
 	need := v.EncodeSize()
 	dst[0] = v.Meta
 	dst[1] = v.UserMeta
-	vSize := binary.PutUvarint(dst, v.ExpiresAt)
+	vSize := binary.PutUvarint(dst[2:], v.ExpiresAt)
 
 	copy(dst[2+vSize:], v.Value)
 	return uint32(need)

@@ -5,7 +5,6 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/YzmjY/toykv/val"
 	"github.com/YzmjY/toykv/x"
 )
 
@@ -29,12 +28,12 @@ func (nd *node) key(arena *Arena) []byte {
 	return arena.getKey(nd.keyOffset, nd.keySize)
 }
 
-func (nd *node) val(arena *Arena) val.ValueStruct {
+func (nd *node) val(arena *Arena) x.ValueStruct {
 	offset, size := decodeValue(nd.value.Load())
 	return arena.getVal(offset, size)
 }
 
-func (nd *node) setValue(arena *Arena, v val.ValueStruct) {
+func (nd *node) setValue(arena *Arena, v x.ValueStruct) {
 	offset := arena.allocVal(v)
 	size := v.EncodeSize()
 
@@ -91,7 +90,7 @@ func (s *Skiplist) DecrRef() {
 	s.head = nil
 }
 
-func newNode(arena *Arena, key []byte, v val.ValueStruct, height int) *node {
+func newNode(arena *Arena, key []byte, v x.ValueStruct, height int) *node {
 	ndOffset := arena.allocNode(height)
 	nd := arena.getNode(ndOffset)
 	nd.setValue(arena, v)
@@ -103,7 +102,7 @@ func newNode(arena *Arena, key []byte, v val.ValueStruct, height int) *node {
 
 func NewSkiplist(arenaSize int64) *Skiplist {
 	arena := newArena(arenaSize)
-	head := newNode(arena, nil, val.ValueStruct{}, maxHeight)
+	head := newNode(arena, nil, x.ValueStruct{}, maxHeight)
 
 	s := &Skiplist{
 		arena: arena,
@@ -135,13 +134,15 @@ func (s *Skiplist) getHeight() int32 {
 }
 
 // !!! 无锁实现
-func (s *Skiplist) Put(key []byte, v val.ValueStruct) {
+func (s *Skiplist) Put(key []byte, v x.ValueStruct) {
 	// 实现无锁的插入
 	height := s.getHeight()
 	var (
 		prev [maxHeight + 1]*node
 		next [maxHeight + 1]*node
 	)
+	prev[height] = s.head
+	next[height] = nil
 
 	// 获取当前skiplist下，插入节点在各层上的前驱后继
 	for i := int(height) - 1; i >= 0; i-- {
@@ -176,7 +177,8 @@ func (s *Skiplist) Put(key []byte, v val.ValueStruct) {
 			// 还没获取该层的前驱后继，可能是插入了其他node，导致skiplist 的层高变高了
 			prev[i], next[i] = s.findSpliceForLevel(key, s.head, i)
 		}
-		nextOffset := next[i].getNextOffset(i)
+
+		nextOffset := s.arena.getNodeOffset(next[i])
 		newNode.tower[i].Store(nextOffset) // 如果next已经变了，那么下面的cas会失败
 		if prev[i].casNextOffset(i, nextOffset, newNode.getNodeOffset(s.arena)) {
 			// prev[i] next[i]之间没有插入新元素，本层插入成功
@@ -194,13 +196,20 @@ func (s *Skiplist) Put(key []byte, v val.ValueStruct) {
 
 }
 
-func (s *Skiplist) Get(key []byte) val.ValueStruct {
+func (s *Skiplist) Get(key []byte) x.ValueStruct {
 	n, _ := s.findGreaterOrEqual(key)
 	if n == nil {
-		return val.ValueStruct{}
+		return x.ValueStruct{}
 	}
 
-	return n.val(s.arena)
+	tarKey := n.key(s.arena)
+	if !x.SameUserKey(tarKey, key) {
+		return x.ValueStruct{}
+	}
+
+	val := n.val(s.arena)
+	val.Version = x.ParseTs(tarKey)
+	return val
 }
 
 func (s *Skiplist) Empty() bool {
@@ -216,7 +225,7 @@ func (s *Skiplist) findSpliceForLevel(key []byte, before *node, level int) (*nod
 
 		// next not nil, compare keys
 		nextKey := next.key(s.arena)
-		if cmp := x.KeyCompare(key, nextKey); cmp == 0 {
+		if cmp := x.KeysCompare(key, nextKey); cmp == 0 {
 			return next, next
 		} else if cmp < 0 {
 			return before, next
@@ -252,6 +261,7 @@ func (s *Skiplist) findLast() *node {
 	}
 }
 
+// findGreaterOrEqual 获取第一个大于等于key的node
 func (s *Skiplist) findGreaterOrEqual(key []byte) (*node, bool) {
 	// 最高层开始，判断next
 	// next > key : 找最小的大于，下降一层
@@ -273,7 +283,7 @@ func (s *Skiplist) findGreaterOrEqual(key []byte) (*node, bool) {
 		}
 
 		nextKey := next.key(s.arena)
-		cmp := x.KeyCompare(key, nextKey)
+		cmp := x.KeysCompare(key, nextKey)
 		if cmp == 0 {
 			return next, true
 		} else if cmp < 0 {
@@ -289,7 +299,7 @@ func (s *Skiplist) findGreaterOrEqual(key []byte) (*node, bool) {
 	}
 }
 
-func (s *Skiplist) findLessThan(key []byte) *node {
+func (s *Skiplist) findLessThan(key []byte, enableEqual bool) (*node, bool) {
 	// 最高层开始，判断next
 	// next> key :下降一层
 	// next== key : 下降一层
@@ -306,29 +316,147 @@ func (s *Skiplist) findLessThan(key []byte) *node {
 			}
 
 			if cur == s.head {
-				return nil
+				return nil, false
 			}
 
-			return cur
+			return cur, false
 		}
 
 		nextKey := next.key(s.arena)
-		cmp := x.KeyCompare(key, nextKey)
+		cmp := x.KeysCompare(key, nextKey)
+		if cmp == 0 && enableEqual {
+			return next, true
+		}
+
 		if cmp <= 0 {
-			// key < nextKey
+			// key <= nextKey
 			if height > 0 {
 				height--
 				continue
 			}
 
 			if cur == s.head {
-				return nil
+				return nil, false
 			}
 
-			return cur
+			return cur, false
 		} else {
 			cur = next
 		}
-
 	}
+}
+
+func (s *Skiplist) NewIterator() *Iterator {
+	s.IncrRef()
+	return &Iterator{
+		cur: s.head,
+		skl: s,
+	}
+}
+
+type Iterator struct {
+	cur *node
+	skl *Skiplist
+}
+
+func (iter *Iterator) Close() {
+	iter.skl.DecrRef()
+	iter.cur = nil
+	iter.skl = nil
+}
+
+func (iter *Iterator) Next() {
+	iter.cur = iter.skl.getNext(iter.cur, 0)
+}
+
+func (iter *Iterator) Prev() {
+	iter.cur, _ = iter.skl.findLessThan(iter.cur.key(iter.skl.arena), false)
+}
+
+// Vaild 当前迭代器是否有效，即cur是一个有效元素
+func (iter *Iterator) Vaild() bool {
+	return !(iter.cur == nil || iter.cur == iter.skl.head)
+}
+
+// Seek 移动到第一个大于等于key的位置
+func (iter *Iterator) Seek(key []byte) {
+	iter.cur, _ = iter.skl.findGreaterOrEqual(key)
+}
+
+// SeekPrev 移动到最后一个小于等于key的位置
+func (iter *Iterator) SeekPrev(key []byte) {
+	iter.cur, _ = iter.skl.findLessThan(key, true)
+}
+
+// SeekToLast 移动到最后一个元素
+func (iter *Iterator) SeekToLast() {
+	iter.cur = iter.skl.findLast()
+}
+
+// SeekToFirst 移动到第一个元素
+func (iter *Iterator) SeekToFirst() {
+	iter.cur = iter.skl.getNext(iter.skl.head, 0)
+}
+
+func (iter *Iterator) Key() []byte {
+	return iter.cur.key(iter.skl.arena)
+}
+
+func (iter *Iterator) Value() x.ValueStruct {
+	return iter.cur.val(iter.skl.arena)
+}
+
+// UniIterator 单向迭代器，reversed参数表示迭代的方向
+type UniIterator struct {
+	reversed bool
+	iter     *Iterator
+}
+
+var _ x.Iterator = &UniIterator{}
+
+func (s *Skiplist) NewUinIterator(reversed bool) *UniIterator {
+	return &UniIterator{
+		reversed: reversed,
+		iter:     s.NewIterator(),
+	}
+}
+
+func (ui *UniIterator) Next() {
+	if ui.reversed {
+		ui.iter.Prev()
+	} else {
+		ui.iter.Next()
+	}
+}
+
+func (ui *UniIterator) Vaild() bool {
+	return ui.iter.Vaild()
+}
+
+func (ui *UniIterator) Rewind() {
+	if !ui.reversed {
+		ui.iter.SeekToFirst()
+	} else {
+		ui.iter.SeekToLast()
+	}
+}
+
+func (ui *UniIterator) Seek(key []byte) {
+	if ui.reversed {
+		ui.iter.SeekPrev(key)
+	} else {
+		ui.iter.Seek(key)
+	}
+}
+
+func (ui *UniIterator) Key() []byte {
+	return ui.iter.Key()
+}
+
+func (ui *UniIterator) Value() x.ValueStruct {
+	return ui.iter.Value()
+}
+
+func (ui *UniIterator) Close() {
+	ui.iter.Close()
 }

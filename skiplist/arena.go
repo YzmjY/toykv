@@ -4,7 +4,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/YzmjY/toykv/val"
+	"github.com/YzmjY/toykv/x"
 )
 
 const (
@@ -21,7 +21,7 @@ type Arena struct {
 
 func newArena(n int64) *Arena {
 	ans := Arena{}
-	ans.buf = make([]byte, 0, n)
+	ans.buf = make([]byte, n)
 	ans.n.Store(1)
 
 	return &ans
@@ -44,7 +44,7 @@ func (s *Arena) allocNode(height int) uint32 {
 	return (end - size + uint32(nodeAlign)) & ^uint32(nodeAlign)
 }
 
-func (s *Arena) allocVal(val val.ValueStruct) uint32 {
+func (s *Arena) allocVal(val x.ValueStruct) uint32 {
 	size := val.EncodeSize()
 
 	end := s.n.Add(size)
@@ -69,7 +69,7 @@ func (s *Arena) getKey(offset uint32, size uint16) []byte {
 	return s.buf[offset : offset+uint32(size)]
 }
 
-func (s *Arena) getVal(offset uint32, size uint32) (ret val.ValueStruct) {
+func (s *Arena) getVal(offset uint32, size uint32) (ret x.ValueStruct) {
 	ret.Decode(s.buf[offset : offset+size])
 	return
 }
