@@ -6,6 +6,9 @@ import (
 	"math"
 )
 
+// KeyWithTs userKey+timestamp:其中timestamp表示版本，用MaxUint64减一下
+// 目的在于：拿较小的时间戳查询时，不应该查询到大时间戳即在此之后的版本，所以时间戳小的反而优先级高
+// 在跳表的后面
 func KeyWithTs(key []byte, ts uint64) []byte {
 	out := make([]byte, len(key)+8)
 	copy(out, key)
